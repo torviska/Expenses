@@ -1,86 +1,107 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 import datetime
-import gspread
-from google.oauth2.service_account import Credentials
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Finanças Victor & Elaine", page_icon="💶", layout="centered")
 
-# --- FUNÇÃO MÁGICA PARA LIMPAR A CHAVE ---
-def get_gspread_client():
-    s = st.secrets["connections"]["gsheets"]
-    
-    # Limpeza profunda da chave privada
-    raw_key = s["private_key"]
-    
-    # Remove \n literais, remove espaços duplos e garante as quebras corretas
-    clean_key = raw_key.replace("\\n", "\n").replace(" ", " ")
-    if "-----BEGIN PRIVATE KEY-----" not in clean_key:
-        clean_key = "-----BEGIN PRIVATE KEY-----\n" + clean_key + "\n-----END PRIVATE KEY-----"
-    
-    credentials_dict = {
-        "type": s["type"],
-        "project_id": s["project_id"],
-        "private_key_id": s["private_key_id"],
-        "private_key": clean_key,
-        "client_email": s["client_email"],
-        "client_id": s["client_id"],
-        "auth_uri": s["auth_uri"],
-        "token_uri": s["token_uri"],
-        "auth_provider_x509_cert_url": s["auth_provider_x509_cert_url"],
-        "client_x509_cert_url": s["client_x509_cert_url"]
-    }
-    
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
-    return gspread.authorize(creds)
+# --- FUNÇÃO PARA CONECTAR AO BANCO DE DADOS LOCAL ---
+def conectar_banco():
+    conn = sqlite3.connect('financeiro.db', check_same_thread=False)
+    cursor = conn.cursor()
+    # Cria a tabela se ela não existir
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS despesas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data TEXT,
+            descricao TEXT,
+            valor REAL,
+            tipo TEXT,
+            pago_por TEXT
+        )
+    ''')
+    conn.commit()
+    return conn
 
-# --- CARREGAR DADOS ---
-@st.cache_data(ttl=0)
-def carregar_dados():
-    try:
-        client = get_gspread_client()
-        sheet = client.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"]).sheet1
-        data = sheet.get_all_records()
-        return pd.DataFrame(data)
-    except Exception as e:
-        return pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Type', 'Paid By'])
-
-df = carregar_dados()
+conn = conectar_banco()
 
 # --- INTERFACE ---
+st.title("💶 Financeiro Familiar")
+st.info("Dados armazenados localmente via SQLite (Sem Google Sheets).")
+
 PERSON1 = "Victor"
 PERSON2 = "Elaine"
 
-st.title("💶 Financeiro Familiar")
-
+# --- BARRA LATERAL: ENTRADA DE DADOS ---
 with st.sidebar:
     st.header("Novo Lançamento")
     data_sel = st.date_input("Data", datetime.date.today())
     desc = st.text_input("Descrição")
-    valor = st.number_input("Valor (€)", min_value=0.0, format="%.2f")
-    tipo = st.selectbox("Tipo", ["Shared", "Individual"])
+    valor = st.number_input("Valor (€)", min_value=0.0, format="%.2f", step=0.50)
+    tipo = st.selectbox("Tipo", ["Shared", "Individual"], 
+                        format_func=lambda x: "Compartilhado (50/50)" if x == "Shared" else "Individual")
     pago_por = st.selectbox("Pago por", [PERSON1, PERSON2])
     
-    if st.button("Registrar"):
+    if st.button("Registrar Lançamento"):
         if desc and valor > 0:
-            try:
-                client = get_gspread_client()
-                sheet = client.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"]).sheet1
-                nova_linha = [data_sel.strftime("%Y-%m-%d"), desc, valor, tipo, pago_por]
-                sheet.append_row(nova_linha)
-                st.success("✅ Registrado!")
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao salvar: {e}")
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO despesas (data, descricao, valor, tipo, pago_por)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (data_sel.strftime("%Y-%m-%d"), desc, valor, tipo, pago_por))
+            conn.commit()
+            st.success("✅ Registrado com sucesso!")
+            st.rerun()
         else:
-            st.error("⚠️ Preencha os campos.")
+            st.error("⚠️ Preencha a descrição e o valor.")
 
-# --- TABELA ---
+# --- CARREGAR E EXIBIR DADOS ---
+df = pd.read_sql_query("SELECT * FROM despesas", conn)
+
 if not df.empty:
-    st.write("### Histórico")
-    st.dataframe(df.sort_values(by=df.columns[0], ascending=False), use_container_width=True, hide_index=True)
+    df['data'] = pd.to_datetime(df['data'])
+    
+    # Seletor de Mês
+    meses = sorted(df['data'].dt.strftime('%Y-%m').unique().tolist(), reverse=True)
+    mes_ref = st.selectbox("Mês de Referência", options=meses)
+    df_mes = df[df['data'].dt.strftime('%Y-%m') == mes_ref].copy()
+    
+    # Cálculos de Acerto
+    v_deve, e_deve = 0, 0
+    for _, r in df_mes.iterrows():
+        val = float(r['valor'])
+        if r['tipo'] == "Shared":
+            if r['pago_por'] == PERSON1: e_deve += val / 2
+            else: v_deve += val / 2
+        else:
+            if r['pago_por'] == PERSON1: e_deve += val
+            else: v_deve += val
+                
+    saldo = e_deve - v_deve
+    
+    # Dashboard
+    c1, c2 = st.columns(2)
+    c1.metric("Total no Mês", f"€ {df_mes['valor'].sum():.2f}")
+    if saldo > 0:
+        c2.metric(f"{PERSON2} deve a {PERSON1}", f"€ {abs(saldo):.2f}")
+    elif saldo < 0:
+        c2.metric(f"{PERSON1} deve a {PERSON2}", f"€ {abs(saldo):.2f}")
+    else:
+        c2.metric("Saldo", "Zerado")
+
+    st.divider()
+    # Tabela formatada
+    df_exibicao = df_mes.copy()
+    df_exibicao['data'] = df_exibicao['data'].dt.strftime('%d/%m/%Y')
+    st.dataframe(df_exibicao.sort_values("data", ascending=False), 
+                 use_container_width=True, hide_index=True)
+    
+    # Botão para limpar tudo (opcional, use com cuidado)
+    if st.checkbox("Mostrar opções de exclusão"):
+        if st.button("Apagar todos os dados"):
+            conn.cursor().execute("DELETE FROM despesas")
+            conn.commit()
+            st.rerun()
 else:
-    st.info("Aguardando dados...")
+    st.write("Ainda não há lançamentos. Use a barra lateral para começar!")
