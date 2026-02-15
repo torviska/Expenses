@@ -6,12 +6,16 @@ import datetime
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Finanças Victor & Elaine", page_icon="💶", layout="centered")
 
-# --- TRATAMENTO DA CHAVE PRIVADA ---
+# --- TRATAMENTO DA CHAVE PRIVADA (SOLUÇÃO PARA O TYPEERROR) ---
+# Em vez de tentar mudar o segredo, criamos um dicionário de configuração personalizado
 if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
-    st.secrets["connections"]["gsheets"]["private_key"] = st.secrets["connections"]["gsheets"]["private_key"].replace("\\n", "\n")
-
-# --- CONEXÃO ---
-conn = st.connection("gsheets", type=GSheetsConnection)
+    creds = dict(st.secrets["connections"]["gsheets"])
+    creds["private_key"] = creds["private_key"].replace("\\n", "\n")
+    # Usamos a conexão passando as credenciais corrigidas
+    conn = st.connection("gsheets", type=GSheetsConnection, **creds)
+else:
+    # Caso não ache os secrets, tenta a conexão padrão (ou avisa)
+    conn = st.connection("gsheets", type=GSheetsConnection)
 
 def carregar_dados():
     try:
@@ -40,7 +44,6 @@ with st.sidebar:
     
     if st.button("Registrar"):
         if desc and valor > 0:
-            # Aqui estava o erro de fechamento de chaves/parênteses
             nova_linha = pd.DataFrame([{
                 "Date": data_sel.strftime("%Y-%m-%d"),
                 "Description": desc,
@@ -60,7 +63,10 @@ with st.sidebar:
 
 # --- DASHBOARD ---
 if not df.empty:
+    # Garantir que Amount seja numérico
+    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
     df['Date'] = pd.to_datetime(df['Date'])
+    
     meses = sorted(df['Date'].dt.strftime('%Y-%m').unique().tolist(), reverse=True)
     mes_ref = st.selectbox("Mês", options=meses)
     df_mes = df[df['Date'].dt.strftime('%Y-%m') == mes_ref]
@@ -91,6 +97,6 @@ if not df.empty:
     st.divider()
     df_ex = df_mes.copy()
     df_ex['Date'] = df_ex['Date'].dt.strftime('%d/%m/%Y')
-    st.dataframe(df_ex.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+    st.dataframe(df_ex.sort_values("Data", ascending=False), use_container_width=True, hide_index=True)
 else:
     st.info("Planilha vazia. Adicione o primeiro gasto!")
