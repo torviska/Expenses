@@ -16,8 +16,13 @@ PERSON2 = "Elaine"
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def get_data():
-    # ttl=0 evita cache para ver os dados na hora
-    return conn.read(ttl="0s").dropna(how="all")
+    try:
+        data = conn.read(ttl="0s")
+        if data is None or data.empty:
+            return pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Type', 'Paid By'])
+        return data.dropna(how="all")
+    except:
+        return pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Type', 'Paid By'])
 
 df = get_data()
 
@@ -30,13 +35,11 @@ def calcular_acerto(data):
     for _, row in data.iterrows():
         try:
             valor = float(row['Amount'])
-            # Tipo 'Shared' (Compartilhado): cada um deve metade.
             if row['Type'] == 'Shared':
                 if row['Paid By'] == PERSON1:
                     total_elaine_deve += valor / 2
                 else:
                     total_victor_deve += valor / 2
-            # Tipo 'Individual': quem não pagou deve o valor total.
             else: 
                 if row['Paid By'] == PERSON1:
                     total_elaine_deve += valor
@@ -65,5 +68,39 @@ with st.sidebar:
                 "Type": tipo,
                 "Paid By": pago_por
             }])
-            # Adiciona ao dataframe atual
-            updated_df = pd.
+            # Adiciona ao dataframe atual e salva (Aqui estava o seu erro!)
+            updated_df = pd.concat([df, new_row], ignore_index=True)
+            conn.update(data=updated_df)
+            st.success("Registrado!")
+            st.rerun()
+        else:
+            st.error("Por favor, preencha descrição e valor.")
+
+# --- DASHBOARD ---
+if not df.empty:
+    df['Date'] = pd.to_datetime(df['Date'])
+    meses_disponiveis = df['Date'].dt.strftime('%Y-%m').unique().tolist()
+    meses_disponiveis.sort(reverse=True)
+    
+    mes_atual = st.selectbox("Mês de Referência", options=meses_disponiveis)
+    df_mes = df[df['Date'].dt.strftime('%Y-%m') == mes_atual]
+    
+    acerto = calcular_acerto(df_mes)
+    st.subheader(f"Resumo: {mes_atual}")
+    
+    c1, c2 = st.columns(2)
+    c1.metric("Total Gasto", f"€ {df_mes['Amount'].sum():.2f}")
+    if acerto > 0:
+        c2.metric(f"{PERSON2} deve a {PERSON1}", f"€ {abs(acerto):.2f}")
+    elif acerto < 0:
+        c2.metric(f"{PERSON1} deve a {PERSON2}", f"€ {abs(acerto):.2f}")
+    else:
+        c2.metric("Saldo", "€ 0.00")
+
+    st.divider()
+    st.subheader("Histórico")
+    df_vis = df_mes.copy()
+    df_vis['Date'] = df_vis['Date'].dt.strftime('%d/%m/%Y')
+    st.dataframe(df_vis.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+else:
+    st.info("Nenhuma despesa encontrada na planilha.")
