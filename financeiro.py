@@ -1,38 +1,52 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import datetime
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Finanças Victor & Elaine", page_icon="💶", layout="centered")
 
-# --- TRATAMENTO DA CHAVE PRIVADA (SOLUÇÃO PARA O TYPEERROR) ---
-# Em vez de tentar mudar o segredo, criamos um dicionário de configuração personalizado
-if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
-    creds = dict(st.secrets["connections"]["gsheets"])
-    creds["private_key"] = creds["private_key"].replace("\\n", "\n")
-    # Usamos a conexão passando as credenciais corrigidas
-    conn = st.connection("gsheets", type=GSheetsConnection, **creds)
-else:
-    # Caso não ache os secrets, tenta a conexão padrão (ou avisa)
-    conn = st.connection("gsheets", type=GSheetsConnection)
+# --- CONFIGURAÇÃO DE ACESSO ---
+def get_gspread_client():
+    # Puxa os dados dos secrets e corrige a chave privada
+    s = st.secrets["connections"]["gsheets"]
+    credentials_dict = {
+        "type": s["type"],
+        "project_id": s["project_id"],
+        "private_key_id": s["private_key_id"],
+        "private_key": s["private_key"].replace("\\n", "\n"),
+        "client_email": s["client_email"],
+        "client_id": s["client_id"],
+        "auth_uri": s["auth_uri"],
+        "token_uri": s["token_uri"],
+        "auth_provider_x509_cert_url": s["auth_provider_x509_cert_url"],
+        "client_x509_cert_url": s["client_x509_cert_url"]
+    }
+    
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
+    return gspread.authorize(creds)
 
+# --- CARREGAR DADOS ---
 def carregar_dados():
-    try:
-        data = conn.read(ttl="0s")
-        return data.dropna(how="all")
-    except:
-        return pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Type', 'Paid By'])
+    client = get_gspread_client()
+    # Abre a planilha pelo link que está no secret
+    sheet = client.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"]).sheet1
+    data = sheet.get_all_records()
+    return pd.DataFrame(data)
 
-df = carregar_dados()
+try:
+    df = carregar_dados()
+except:
+    df = pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Type', 'Paid By'])
 
-# --- DEFINIÇÕES ---
+# --- INTERFACE ---
 PERSON1 = "Victor"
 PERSON2 = "Elaine"
 
 st.title("💶 Financeiro Familiar")
 
-# --- BARRA LATERAL: ENTRADA DE DADOS ---
 with st.sidebar:
     st.header("Novo Lançamento")
     data_sel = st.date_input("Data", datetime.date.today())
@@ -44,26 +58,26 @@ with st.sidebar:
     
     if st.button("Registrar"):
         if desc and valor > 0:
-            nova_linha = pd.DataFrame([{
-                "Date": data_sel.strftime("%Y-%m-%d"),
-                "Description": desc,
-                "Amount": valor,
-                "Type": tipo,
-                "Paid By": pago_por
-            }])
+            client = get_gspread_client()
+            sheet = client.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"]).sheet1
             
-            df_atualizado = pd.concat([df, nova_linha], ignore_index=True)
-            conn.update(data=df_atualizado)
+            # Prepara a linha para o Google Sheets
+            nova_linha = [
+                data_sel.strftime("%Y-%m-%d"),
+                desc,
+                valor,
+                tipo,
+                pago_por
+            ]
             
-            st.success("✅ Registrado!")
-            st.cache_data.clear()
+            sheet.append_row(nova_linha)
+            st.success("✅ Registrado com sucesso!")
             st.rerun()
         else:
             st.error("⚠️ Preencha descrição e valor.")
 
 # --- DASHBOARD ---
 if not df.empty:
-    # Garantir que Amount seja numérico
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
     df['Date'] = pd.to_datetime(df['Date'])
     
@@ -97,6 +111,6 @@ if not df.empty:
     st.divider()
     df_ex = df_mes.copy()
     df_ex['Date'] = df_ex['Date'].dt.strftime('%d/%m/%Y')
-    st.dataframe(df_ex.sort_values("Data", ascending=False), use_container_width=True, hide_index=True)
+    st.dataframe(df_ex.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
 else:
-    st.info("Planilha vazia. Adicione o primeiro gasto!")
+    st.info("Planilha vazia ou sem dados.")
